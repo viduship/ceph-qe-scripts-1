@@ -48,6 +48,16 @@ def test_exec(config, ssh_con):
         subuser_info = swiftlib.create_non_tenant_sub_users(
             config.container_count, user_info
         )
+        # Validate that secret_key is generated for all subusers
+        # Close loop JIRA automation https://ibm-ceph.atlassian.net/browse/IBMCEPH-12342
+        ceph_version_id, _ = utils.get_ceph_version()
+        if ceph_version_id >= "20.2":
+            for subuser in subuser_info:
+                if "key" not in subuser or not subuser["key"]:
+                    raise TestExecError(
+                        f"secret_key not generated for subuser {subuser.get('user_id', 'unknown')}"
+                    )
+                log.info(f"secret_key verified for subuser: {subuser['user_id']}")
         auth = Auth(subuser_info[-1], ssh_con, config.ssl)
         rgw = auth.do_auth_using_client()
 
