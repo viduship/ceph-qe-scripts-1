@@ -44,7 +44,7 @@ def test_exec(config, ssh_con):
     if config.test_ops.get("test_perf_dump", False):
         reusable.check_service_port(service="ceph-exporter")
         reusable.check_service_port(service="prometheus")
-        reusable.get_cluster_id_from_ceph()
+        reusable.get_cluster_id_from_ceph(ssh_con=ssh_con)
         log.info(f"ssh conn is {ssh_con}")
         reusable.get_perf_dump(ssh_con=ssh_con)
 
