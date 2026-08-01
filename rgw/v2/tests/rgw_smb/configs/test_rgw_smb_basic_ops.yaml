@@ -1,0 +1,36 @@
+# script: test_rgw_smb_basic_ops.py
+# polarion-ID: CEPH-83632451
+# Description: Basic SMB share create, list and delete with RGW backend
+#
+# Workflow:
+#   1. Create RGW user: user1
+#   2. Create bucket: test1
+#   3. Use existing smb cluster
+#   4. Apply SMB resources (credential + RGW-backed share)
+#   5. List shares and verify
+#   6. Delete share/credential and verify
+#   7. Delete SMB clsuter and validate
+#
+# Prerequisite: SMB mgr module enabled. Set create_smb_cluster: true
+# if cluster rgw-smb does not already exist this will fail.
+config:
+  user_count: 1
+  bucket_count: 1
+  objects_count: 0
+  user_remove: true
+  test_ops:
+    user_name: user1
+    bucket_name: test1
+    create_bucket: true
+    cluster_id: rgw-smb
+    share_id: rgw-share2
+    share_name: rshare2
+    credential_id: external-rgw-creds
+    create_smb_cluster: false
+    smb_auth_mode: user
+    define_user_pass: smbuser%smbpass
+    create_smb_share: true
+    list_smb_share: true
+    delete_smb_share: true
+    delete_via_apply: true
+    delete_smb_cluster: true
