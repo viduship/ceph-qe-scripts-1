@@ -88,8 +88,7 @@ def assert_no_conflicting_so_reuseport(snap):
         )
         log.error("=" * 60)
         raise TestExecError(
-            "rgw_frontends has both so_reuseport=1 and so_reuseport=0: "
-            f"{bad}"
+            "rgw_frontends has both so_reuseport=1 and so_reuseport=0: " f"{bad}"
         )
     # Also require a single coherent policy matching allow_port_reuse
     for name, info in snap.items():
@@ -182,9 +181,7 @@ def scenario_extra_args_frontend(config, ssh_con):
         mode = ops.get("frontend_assert", "no_duplicate")
         if mode == "no_duplicate":
             # Still expect so_reuseport present for allow_port_reuse=true
-            rp.verify_frontends(
-                daemons, expect_reuseport=True, expected_port=port
-            )
+            rp.verify_frontends(daemons, expect_reuseport=True, expected_port=port)
             assert_no_duplicate_so_reuseport(snap)
         elif mode == "no_conflict":
             assert_no_conflicting_so_reuseport(snap)
@@ -265,9 +262,7 @@ def scenario_multi_host(config, ssh_con):
         placement = [h["hostname"] for h in hosts[:2]]
         ops["placement_hosts"] = placement
     if len(placement) < 2:
-        raise TestExecError(
-            f"multi-host scenario needs >=2 hosts, got {placement}"
-        )
+        raise TestExecError(f"multi-host scenario needs >=2 hosts, got {placement}")
     port = int(ops.get("rgw_frontend_port", 8720))
     rp.ensure_firewall_port(port)
     applied = rp.write_and_apply_rgw_spec(ops, hosts, allow_port_reuse=True)

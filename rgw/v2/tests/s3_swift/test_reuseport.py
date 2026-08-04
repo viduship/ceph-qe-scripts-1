@@ -311,7 +311,9 @@ def write_and_apply_rgw_spec(ops, hosts, allow_port_reuse=None):
             ops.get("disable_multisite_sync_traffic")
         )
     if ops.get("rgw_frontend_extra_args") is not None:
-        spec["spec"]["rgw_frontend_extra_args"] = list(ops.get("rgw_frontend_extra_args"))
+        spec["spec"]["rgw_frontend_extra_args"] = list(
+            ops.get("rgw_frontend_extra_args")
+        )
     if ops.get("ssl") is not None:
         spec["spec"]["ssl"] = bool(ops.get("ssl"))
     spec_path = ops.get("spec_path", "/tmp/rgw_reuseport_spec.yaml")
@@ -539,9 +541,7 @@ def cleanup_service(service_name, enabled=True, timeout=180):
     deadline = time.time() + timeout
     removed = False
     while time.time() < deadline:
-        remaining = utils.exec_shell_cmd(
-            f"ceph orch ls --service-name {svc} -f json"
-        )
+        remaining = utils.exec_shell_cmd(f"ceph orch ls --service-name {svc} -f json")
         text = str(remaining or "").strip()
         if (not text) or text.startswith("No services") or text in ("[]", "null"):
             log.info(f"Service {svc} fully removed")
@@ -679,9 +679,7 @@ def test_exec(config, ssh_con):
             before_snap = collect_frontend_snapshot(before_daemons)
             log.info(f"BEFORE toggle snapshot: {json.dumps(before_snap)}")
 
-            applied = write_and_apply_rgw_spec(
-                ops, hosts, allow_port_reuse=toggle_to
-            )
+            applied = write_and_apply_rgw_spec(ops, hosts, allow_port_reuse=toggle_to)
             # Give scheduler a moment to start reconfiguring
             settle = int(ops.get("toggle_settle_secs", 30))
             log.info(f"Waiting {settle}s for orch to start reconciling toggle...")
