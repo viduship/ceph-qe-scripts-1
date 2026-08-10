@@ -1,0 +1,37 @@
+# script: test_rgw_smb_basic_ops.py
+# polarion-ID: CEPH-83632451
+# Description: Create SMB cluster with placement label:smb, then
+#              perform basic RGW-backed share create/list/delete
+#
+# Workflow:
+#   1. Create RGW user: user1
+#   2. Create bucket: test1
+#   3. Create SMB cluster rgw-smb with --placement="label:smb"
+#   4. Apply SMB resources (credential + RGW-backed share)
+#   5. List shares and verify
+#   6. Delete share/credential and verify
+#
+# Prerequisite: Host(s) labeled with 'smb' via:
+#   ceph orch host label add <host> smb
+config:
+  user_count: 1
+  bucket_count: 1
+  objects_count: 0
+  user_remove: true
+  test_ops:
+    user_name: user1
+    bucket_name: test1
+    create_bucket: true
+    cluster_id: rgw-smb
+    share_id: rgw-share1
+    share_name: rshare1
+    credential_id: external-rgw-creds
+    create_smb_cluster: true
+    smb_auth_mode: user
+    define_user_pass: smbuser%smbpass
+    placement: "label:smb"
+    create_smb_share: true
+    list_smb_share: true
+    delete_smb_share: true
+    delete_via_apply: true
+    delete_smb_cluster: false
