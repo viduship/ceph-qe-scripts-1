@@ -8,7 +8,7 @@ import subprocess
 import sys
 import urllib.request
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import boto3
 from botocore.exceptions import ClientError
@@ -3803,24 +3803,19 @@ def delete_indexless_bucket(bucket):
 
 def check_service_port(service, ssh_con=None):
     """
-    Check the port assigned to a service.
-
-    This method attempts to retrieve the port number for a given service by:
-        1. Checking Ceph orchestrator services (via 'ceph orch ls')
+    Check the port assigned to a service via ceph orch ls.
 
     Args:
-        service (str): Name of the service to check (e.g., 'rgw')
+        service (str): Name of the service to check (e.g., 'rgw', 'prometheus')
         ssh_con: SSH connection object for remote execution (optional)
 
     Returns:
         str: Port number assigned to the service
 
     Raises:
-        Exception: If unable to determine the service port
+        TestExecError: If unable to determine the service port
     """
     log.info(f"Checking port for service: {service}")
-
-    # Try to get port from Ceph orchestrator first (for Ceph services)
     try:
         ceph_orch_cmd = f"ceph orch ls --service-type {service} --format json"
         if ssh_con is not None:
@@ -3834,20 +3829,80 @@ def check_service_port(service, ssh_con=None):
             orch_data = json.loads(orch_output)
             if orch_data and len(orch_data) > 0:
                 service_info = orch_data[0]
-                if "status" in service_info and "ports" in service_info["status"]:
-                    ports = service_info["status"]["ports"]
-                    if ports and len(ports) > 0:
-                        port = str(ports[0])
-                        log.info(f"Port for service '{service}' from ceph orch: {port}")
-                        return port
+                ports = service_info.get("status", {}).get("ports") or []
+                if ports:
+                    port = str(ports[0])
+                    log.info(f"Port for service '{service}' from ceph orch: {port}")
+                    return port
     except Exception as e:
         log.debug(f"Could not get port from ceph orch for service '{service}': {e}")
 
+    raise TestExecError(f"Unable to determine port for service '{service}'")
 
-def get_cluster_id_from_ceph():
+
+def get_service_host(service, ssh_con=None):
+    """
+    Resolve a host/IP for a ceph orch service from placement.
+
+    Args:
+        service (str): Service type (e.g., 'ceph-exporter', 'prometheus')
+        ssh_con: Optional SSH connection
+
+    Returns:
+        str: Hostname or IP for the service
+    """
+    ceph_orch_cmd = f"ceph orch ls --service-type {service} --format json"
+    if ssh_con is not None:
+        orch_output = utils.remote_exec_shell_cmd(
+            ssh_con, ceph_orch_cmd, return_output=True
+        )
+    else:
+        orch_output = utils.exec_shell_cmd(ceph_orch_cmd)
+
+    if not orch_output:
+        raise TestExecError(f"Empty orch ls output for service '{service}'")
+
+    orch_data = json.loads(orch_output)
+    if not orch_data:
+        raise TestExecError(f"No orch service found for '{service}'")
+
+    service_info = orch_data[0]
+    placement = service_info.get("placement", {})
+    if placement.get("hosts"):
+        return placement["hosts"][0]
+
+    label = placement.get("label")
+    if label:
+        host_ls_cmd = f"ceph orch host ls --label {label} -f json"
+        if ssh_con is not None:
+            host_out = utils.remote_exec_shell_cmd(
+                ssh_con, host_ls_cmd, return_output=True
+            )
+        else:
+            host_out = utils.exec_shell_cmd(host_ls_cmd)
+        hosts = json.loads(host_out) if host_out else []
+        if hosts:
+            return hosts[0].get("addr") or hosts[0].get("hostname")
+
+    # Fall back to daemon placement via orch ps
+    ps_cmd = f"ceph orch ps --daemon-type {service} --format json"
+    if ssh_con is not None:
+        ps_out = utils.remote_exec_shell_cmd(ssh_con, ps_cmd, return_output=True)
+    else:
+        ps_out = utils.exec_shell_cmd(ps_cmd)
+    daemons = json.loads(ps_out) if ps_out else []
+    if daemons:
+        return daemons[0].get("hostname") or daemons[0].get("addr")
+
+    raise TestExecError(f"Unable to resolve host for service '{service}'")
+
+
+def get_cluster_id_from_ceph(ssh_con=None):
     """
     Fetch cluster id (fsid) from ceph -s command output.
 
+    Prefer local execution: RGW nodes often lack a usable ceph.conf for the CLI.
+    ssh_con is accepted for API compatibility but is only used if local ceph fails.
 
     Returns:
         str: Cluster id (fsid) from ceph status command
@@ -3855,6 +3910,13 @@ def get_cluster_id_from_ceph():
     try:
         log.info("Fetching cluster id from ceph -s command")
         ceph_status_json = utils.exec_shell_cmd("ceph -s --format json")
+        if (not ceph_status_json or ceph_status_json is False) and ssh_con is not None:
+            log.info("Local ceph -s failed; retrying on remote")
+            ceph_status_json = utils.remote_exec_shell_cmd(
+                ssh_con, "ceph -s --format json", return_output=True
+            )
+        if not ceph_status_json or ceph_status_json is False:
+            raise TestExecError("ceph -s returned empty output")
         ceph_status = json.loads(ceph_status_json)
         cluster_id = ceph_status.get("fsid", "")
         if not cluster_id:
@@ -3864,6 +3926,8 @@ def get_cluster_id_from_ceph():
     except json.JSONDecodeError as e:
         log.error(f"Failed to parse ceph -s JSON output: {str(e)}")
         raise TestExecError(f"Invalid JSON output from ceph -s: {str(e)}")
+    except TestExecError:
+        raise
     except Exception as e:
         log.error(f"Failed to fetch cluster id from ceph -s: {str(e)}")
         raise TestExecError(f"Error executing ceph -s command: {str(e)}")
@@ -3873,83 +3937,345 @@ def find_admin_socket(ssh_con=None):
     """
     Find the RGW admin socket file in /var/run/ceph/
 
+    FSID is always resolved locally; socket discovery may use ssh_con when the
+    asok lives on a remote RGW host.
+
     Returns:
-        str: Path to the admin socket file
+        tuple: (socket_path, socket_filename)
     """
-
-    cluster_id = get_cluster_id_from_ceph()
-
+    # Always resolve FSID from the client node (has ceph.conf / keys)
+    cluster_id = get_cluster_id_from_ceph(ssh_con=None)
     socket_path = f"/var/run/ceph/{cluster_id}"
-    cmd = f"sudo find {socket_path} -maxdepth 1 -name 'ceph-client.rgw.*.asok' 2>/dev/null | head -1"
+    # Prefer newest asok; stale sockets from prior restarts may remain
+    cmd = f"sudo bash -lc 'ls -t {socket_path}/ceph-client.rgw.*.asok 2>/dev/null | head -1'"
     log.info(f"command is {cmd}")
 
     if ssh_con:
-        stdin, stdout, stderr = ssh_con.exec_command("hostname")
-        out = stdout.read().decode().strip()
-
         stdin, stdout, stderr = ssh_con.exec_command(cmd)
-        socket_pattern = stdout.read().decode().strip().split("/")[-1]
+        socket_full = stdout.read().decode().strip()
+        socket_pattern = socket_full.split("/")[-1] if socket_full else ""
     else:
-        socket_pattern = utils.exec_shell_cmd(cmd).split("/")[-1]
+        socket_full = utils.exec_shell_cmd(cmd)
+        if not socket_full or socket_full is False:
+            raise TestExecError(f"RGW admin socket not found in {socket_path}")
+        socket_pattern = str(socket_full).strip().split("/")[-1]
+
     if not socket_pattern:
-        raise Exception(f"RGW admin socket not found in {socket_path}")
+        raise TestExecError(f"RGW admin socket not found in {socket_path}")
 
     log.info(f"Found admin socket: {socket_pattern}")
     return socket_path, socket_pattern
 
 
+def _run_admin_daemon_cmd(cmd_name, ssh_con=None, return_json=True):
+    """
+    Run an admin-daemon command against the RGW asok.
+
+    Args:
+        cmd_name (str): Command such as 'perf dump' or 'counter dump'
+        ssh_con: Optional SSH connection
+        return_json (bool): Parse output as JSON when True
+
+    Returns:
+        dict or str: Parsed JSON or raw output
+    """
+    socket_path, socket_file = find_admin_socket(ssh_con)
+    cmd1 = "sudo chmod -R 777 /var/run/ceph/"
+    cmd2 = f"cd {socket_path} ; ceph --admin-daemon {socket_file} {cmd_name}"
+    log.info(f"admin-daemon command: {cmd2}")
+
+    if ssh_con is not None:
+        ssh_con.exec_command(cmd1)
+        stdin, stdout, stderr = ssh_con.exec_command(cmd2)
+        output = stdout.read().decode().strip()
+        error = stderr.read().decode().strip()
+        if error and not output:
+            raise TestExecError(f"Failed to get {cmd_name}: {error}")
+        if error:
+            log.warning(f"{cmd_name} stderr: {error}")
+    else:
+        utils.exec_shell_cmd(cmd1)
+        output = utils.exec_shell_cmd(cmd2)
+        if output is False or output is None:
+            raise TestExecError(f"Failed to execute {cmd_name} command")
+
+    if not output or not str(output).strip():
+        raise TestExecError(f"{cmd_name} command returned empty output")
+
+    if return_json:
+        try:
+            parsed = json.loads(output)
+            log.info(f"Successfully retrieved and parsed {cmd_name}")
+            return parsed
+        except json.JSONDecodeError as e:
+            log.error(f"Failed to parse {cmd_name} as JSON: {e}")
+            log.error(f"Raw output: {output}")
+            raise TestExecError(f"Invalid JSON in {cmd_name}: {e}")
+
+    log.info(f"Successfully retrieved {cmd_name} (raw)")
+    return output
+
+
 def get_perf_dump(ssh_con=None, return_json=True):
     """
-    Fetch perf dump from RGW admin socket
-
-    Parameters:
-        socket_path (str): Path to the admin socket file. If None, will auto-detect.
-        return_json (bool): If True, returns parsed JSON. If False, returns raw string.
+    Fetch perf dump from RGW admin socket.
 
     Returns:
         dict or str: Perf dump data as JSON dict or raw string
     """
+    return _run_admin_daemon_cmd("perf dump", ssh_con=ssh_con, return_json=return_json)
+
+
+def get_counter_dump(ssh_con=None, return_json=True):
+    """
+    Fetch counter dump from RGW admin socket (rgw_op metrics live here).
+
+    Returns:
+        dict or str: Counter dump data as JSON dict or raw string
+    """
+    return _run_admin_daemon_cmd(
+        "counter dump", ssh_con=ssh_con, return_json=return_json
+    )
+
+
+def _normalize_counter_section(section_data):
+    """
+    Normalize counter dump section to a list of {labels, counters} entries.
+
+    Handles both labeled list form and legacy flat-dict form.
+    """
+    if section_data is None:
+        return []
+    if isinstance(section_data, list):
+        return section_data
+    if isinstance(section_data, dict):
+        if "counters" in section_data:
+            return [section_data]
+        # Legacy flat counters dict
+        return [{"labels": {}, "counters": section_data}]
+    return []
+
+
+def get_rgw_op_counters(dump, section="rgw_op", labels=None):
+    """
+    Extract counters from a counter dump section.
+
+    Args:
+        dump (dict): Parsed counter dump
+        section (str): Preferred section name (rgw_op, rgw_op_per_user, ...)
+        labels (dict|None): Optional label filter (e.g. {"Bucket": "b1"})
+
+    Returns:
+        dict: Counters for the matching entry (empty dict if not found)
+    """
+    # Prefer requested section; fall back to renamed section names from newer Ceph
+    section_aliases = {
+        "rgw_op": ["rgw_op", "rgw_op_global"],
+        "rgw_op_per_user": ["rgw_op_per_user", "rgw_op_user"],
+        "rgw_op_per_bucket": ["rgw_op_per_bucket", "rgw_op_bucket"],
+    }
+    candidates = section_aliases.get(section, [section])
+    section_data = None
+    for name in candidates:
+        if name in dump:
+            section_data = dump[name]
+            break
+
+    entries = _normalize_counter_section(section_data)
+    if not entries:
+        log.warning(f"Section '{section}' not found in counter dump")
+        return {}
+
+    if labels is None:
+        # Prefer unlabeled / gateway-scoped entry when present
+        for entry in entries:
+            entry_labels = entry.get("labels") or {}
+            if not entry_labels:
+                return entry.get("counters") or {}
+        return entries[0].get("counters") or {}
+
+    labels_lower = {str(k).lower(): str(v) for k, v in labels.items()}
+    for entry in entries:
+        entry_labels = entry.get("labels") or {}
+        entry_lower = {str(k).lower(): str(v) for k, v in entry_labels.items()}
+        if all(entry_lower.get(k) == v for k, v in labels_lower.items()):
+            return entry.get("counters") or {}
+
+    log.warning(f"No counters matched labels {labels} in section '{section}'")
+    return {}
+
+
+def assert_head_obj_counters(before_counters, after_counters, expected_ops):
+    """
+    Assert head_obj_ops / head_obj_lat increased by at least expected_ops.
+
+    Args:
+        before_counters (dict): Counters snapshot before HEAD traffic
+        after_counters (dict): Counters snapshot after HEAD traffic
+        expected_ops (int): Minimum successful HEAD Object count expected
+    """
+    before_ops = int(before_counters.get("head_obj_ops", 0) or 0)
+    after_ops = int(after_counters.get("head_obj_ops", 0) or 0)
+    delta = after_ops - before_ops
+    log.info(
+        f"head_obj_ops before={before_ops} after={after_ops} "
+        f"delta={delta} expected>={expected_ops}"
+    )
+    if "head_obj_ops" not in after_counters:
+        raise TestExecError(
+            "head_obj_ops not present in counter dump rgw_op counters "
+            "(feature may be missing on this Ceph build)"
+        )
+    if delta < expected_ops:
+        raise TestExecError(
+            f"head_obj_ops delta {delta} is less than expected {expected_ops}"
+        )
+
+    after_lat = after_counters.get("head_obj_lat")
+    if after_lat is None:
+        raise TestExecError("head_obj_lat not present in counter dump")
+    if not isinstance(after_lat, dict):
+        raise TestExecError(f"Unexpected head_obj_lat shape: {after_lat}")
+
+    for key in ("avgcount", "sum", "avgtime"):
+        if key not in after_lat:
+            raise TestExecError(f"head_obj_lat missing '{key}': {after_lat}")
+
+    before_lat = before_counters.get("head_obj_lat") or {}
+    before_avgcount = int(before_lat.get("avgcount", 0) or 0)
+    after_avgcount = int(after_lat.get("avgcount", 0) or 0)
+    if after_avgcount - before_avgcount < expected_ops:
+        raise TestExecError(
+            f"head_obj_lat.avgcount delta "
+            f"{after_avgcount - before_avgcount} < expected {expected_ops}"
+        )
+    if float(after_lat.get("sum", -1)) < 0 or float(after_lat.get("avgtime", -1)) < 0:
+        raise TestExecError(f"head_obj_lat has negative values: {after_lat}")
+
+    log.info("head_obj_ops and head_obj_lat assertions passed")
+
+
+def scrape_exporter_metrics(host, port, timeout=30):
+    """
+    HTTP GET ceph-exporter /metrics endpoint.
+
+    Returns:
+        str: Raw Prometheus text exposition
+    """
+    url = f"http://{host}:{port}/metrics"
+    log.info(f"Scraping exporter metrics from {url}")
     try:
-        # Use provided socket_path or find it automatically
-
-        # Execute perf dump command
-        socket_path, socket_file = find_admin_socket(ssh_con)
-        cmd1 = "sudo chmod -R 777 /var/run/ceph/"
-        cmd2 = f"cd {socket_path} ; ceph --admin-daemon {socket_file} perf dump"
-
-        log.info(f"cmd2 is {cmd2}")
-
-        if ssh_con is not None:
-            ssh_con.exec_command(cmd1)
-            stdin, stdout, stderr = ssh_con.exec_command(cmd2)
-            output = stdout.read().decode().strip()
-            error = stderr.read().decode().strip()
-            log.info(f"cmd2 output is {output}")
-            if error:
-                log.error(f"Error executing perf dump: {error}")
-                raise Exception(f"Failed to get perf dump: {error}")
-        else:
-            utils.exec_shell_cmd(cmd1)
-            output = utils.exec_shell_cmd(cmd2)
-            if output is False or output is None:
-                raise Exception("Failed to execute perf dump command")
-
-        if not output or not output.strip():
-            raise Exception("Perf dump command returned empty output")
-
-        if return_json:
-            try:
-                perf_dump = json.loads(output)
-                log.info("Successfully retrieved and parsed perf dump")
-                return perf_dump
-            except json.JSONDecodeError as e:
-                log.error(f"Failed to parse perf dump as JSON: {e}")
-                log.error(f"Raw output: {output}")
-                raise Exception(f"Invalid JSON in perf dump: {e}")
-        else:
-            log.info("Successfully retrieved perf dump (raw)")
-            return output
-
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="replace")
     except Exception as e:
-        log.error(f"Error fetching perf dump: {e}")
-        raise
+        raise TestExecError(f"Failed to scrape exporter metrics from {url}: {e}")
+
+
+def query_prometheus(host, port, promql, timeout=30):
+    """
+    Query Prometheus HTTP API /api/v1/query.
+
+    Returns:
+        dict: Parsed JSON response body
+    """
+    encoded = quote(promql, safe="")
+    url = f"http://{host}:{port}/api/v1/query?query={encoded}"
+    log.info(f"Querying Prometheus: {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        raise TestExecError(f"Failed to query Prometheus at {url}: {e}")
+
+
+def assert_head_obj_metrics_in_text(metrics_text):
+    """
+    Assert head_obj_ops and head_obj_lat metric names appear in exposition text.
+    """
+    if "head_obj_ops" not in metrics_text:
+        raise TestExecError("head_obj_ops not found in ceph-exporter /metrics output")
+    if "head_obj_lat" not in metrics_text:
+        raise TestExecError("head_obj_lat not found in ceph-exporter /metrics output")
+    log.info("head_obj_* metrics found in exporter scrape")
+
+
+def wait_for_head_obj_prometheus_metrics(
+    rgw_host,
+    ssh_con=None,
+    timeout=90,
+    poll_interval=5,
+    use_prometheus=True,
+):
+    """
+    Wait until head_obj_* metrics appear via ceph-exporter and optionally Prometheus.
+
+    Args:
+        rgw_host (str): RGW host/IP used as the ceph-exporter scrape target
+        ssh_con: Optional SSH connection (unused for exporter host/port)
+        timeout (int): Max seconds to wait per check loop
+        poll_interval (int): Seconds between polls
+        use_prometheus (bool): Also query Prometheus when True
+
+    Returns:
+        dict: Resolved ports/hosts used for verification
+    """
+    # Port from local orch; scrape the exporter on the RGW host under test
+    exporter_port = check_service_port("ceph-exporter")
+    exporter_host = rgw_host
+    log.info(
+        f"Using RGW host as ceph-exporter scrape target: {exporter_host}:{exporter_port}"
+    )
+    result = {
+        "exporter_host": exporter_host,
+        "exporter_port": exporter_port,
+    }
+
+    deadline = time.time() + timeout
+    last_error = None
+    while time.time() < deadline:
+        try:
+            metrics_text = scrape_exporter_metrics(exporter_host, exporter_port)
+            assert_head_obj_metrics_in_text(metrics_text)
+            break
+        except Exception as e:
+            last_error = e
+            log.info(f"Exporter scrape not ready yet: {e}")
+            time.sleep(poll_interval)
+    else:
+        raise TestExecError(
+            f"Timed out waiting for head_obj_* on ceph-exporter: {last_error}"
+        )
+
+    if use_prometheus:
+        prom_port = check_service_port("prometheus")
+        prom_host = get_service_host("prometheus")
+        result["prometheus_host"] = prom_host
+        result["prometheus_port"] = prom_port
+        promql = 'count({__name__=~".*head_obj_ops.*"})'
+        deadline = time.time() + timeout
+        last_error = None
+        while time.time() < deadline:
+            try:
+                resp = query_prometheus(prom_host, prom_port, promql)
+                status = resp.get("status")
+                result_data = (resp.get("data") or {}).get("result") or []
+                if status == "success" and result_data:
+                    value = float(result_data[0]["value"][1])
+                    if value > 0:
+                        log.info(
+                            f"Prometheus reports head_obj_ops metric series count={value}"
+                        )
+                        break
+                last_error = TestExecError(
+                    f"Prometheus query returned no head_obj_ops series: {resp}"
+                )
+            except Exception as e:
+                last_error = e
+            log.info(f"Prometheus query not ready yet: {last_error}")
+            time.sleep(poll_interval)
+        else:
+            raise TestExecError(
+                f"Timed out waiting for head_obj_* in Prometheus: {last_error}"
+            )
+
+    return result
