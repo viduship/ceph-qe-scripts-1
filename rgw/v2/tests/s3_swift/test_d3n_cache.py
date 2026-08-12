@@ -30,30 +30,27 @@ def test_exec(config, ssh_con):
     if config.d3n_feature is True:
         log.info("Enabling D3n feature on the cluster")
         data_path_cmd = f"sudo ls {config.datacache_path}"
-        host_ips = utils.exec_shell_cmd("cut -f 1 /etc/hosts | cut -d ' ' -f 3")
-        host_ips = host_ips.splitlines()
-        log.info(f"hosts_ips: {host_ips}")
-        for ip in host_ips:
-            if ip.startswith("10."):
-                log.info(f"ip is {ip}")
-                ssh_con = utils.connect_remote(ip)
-                stdin, stdout, stderr = ssh_con.exec_command(
-                    "sudo netstat -nltp | grep radosgw"
-                )
-                netstst_op = stdout.readline().strip()
-                log.info(f"netstat op on node {ip} is:{netstst_op}")
-                if netstst_op:
-                    log.info("Entering RGW node")
-                    _, stdout, stderr = ssh_con.exec_command(data_path_cmd)
-                    stderr = stderr.readline().strip()
-                    if stderr:
-                        log.info(f"creating datacache path")
-                        create_cmd = f"sudo mkdir {config.datacache_path}"
-                        log.info(f"executing command:{create_cmd}")
-                        _, stdout, stderr = ssh_con.exec_command(create_cmd)
-                        stderr = stderr.readline().strip()
-                        if stderr:
-                            raise AssertionError("datacache path creation failed!")
+        rgw_ps = json.loads(
+            utils.exec_shell_cmd("ceph orch ps --daemon_type rgw -f json")
+        )
+        rgw_hosts = sorted({daemon["hostname"] for daemon in rgw_ps})
+        for host in rgw_hosts:
+            host_ls = utils.exec_shell_cmd("ceph orch host ls | grep %s" % host)
+            log.info(f"hosts are : {host_ls}")
+            host_ip = host_ls.split()[1]
+            log.info(f"ip is {host_ip}")
+            ssh_con = utils.connect_remote(host_ip)
+            log.info("Entering RGW node")
+            _, stdout, stderr = ssh_con.exec_command(data_path_cmd)
+            stderr = stderr.readline().strip()
+            if stderr:
+                log.info(f"creating datacache path")
+                create_cmd = f"sudo mkdir {config.datacache_path}"
+                log.info(f"executing command:{create_cmd}")
+                _, stdout, stderr = ssh_con.exec_command(create_cmd)
+                stderr = stderr.readline().strip()
+                if stderr:
+                    raise AssertionError("datacache path creation failed!")
         rgw_service_name = utils.exec_shell_cmd("ceph orch ls | grep rgw").split(" ")[0]
         log.info(f"rgw service name is {rgw_service_name}")
         file_name = "/home/rgw_spec.yml"
