@@ -1,0 +1,12 @@
+# Polarion: CEPH-83632923 — Part of the unified dedup test run via test_dedup_pytest.py
+# F3: Network partition
+# ISCE-XXXX - Priority P1
+config:
+  user_count: 1
+  bucket_count: 1
+  objects_count: 100
+  objects_size_range:
+    min: 5120
+    max: 5120
+  test_ops:
+    dedup_type: "infra_network"
