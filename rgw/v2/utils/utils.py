@@ -868,6 +868,68 @@ def get_ceph_version():
     return version_id, version_name
 
 
+def _ceph_version_tuple(version_str):
+    """Parse '20.2.2-123.el9cp' or '19.1.3' into (20, 2, 2)."""
+    parts = []
+    for part in str(version_str).split("-")[0].split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            break
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def check_ceph_version():
+    """
+    Return running ceph version as (X, Y, Z), ignoring -build suffix.
+
+    Example: '20.2.2-123.el9cp' -> (20, 2, 2)
+    """
+    try:
+        ceph_version_id, _ = get_ceph_version()
+    except Exception:
+        log.info("could not get ceph version")
+        return None
+    log.info(f"ceph version: {ceph_version_id}")
+    if not ceph_version_id:
+        return None
+    current = _ceph_version_tuple(ceph_version_id)
+    log.info(f"parsed ceph version: {current}")
+    return current
+
+
+def is_known_issue_version(expected_version, issue_id=None, op="=="):
+    """
+    Check current ceph version against a known-issue release using op.
+
+    :param expected_version: X.Y.Z to compare against, e.g. "20.2.2" or "19.1.3"
+    :param issue_id: optional tracker id to log when matched
+    :param op: "==", "!=", ">", ">=", "<", "<="
+    :return: True if comparison holds (treat as known issue), else False
+    """
+    current = check_ceph_version()
+    if not current:
+        return False
+    expected = _ceph_version_tuple(expected_version)
+    ops = {
+        "==": current == expected,
+        "!=": current != expected,
+        ">": current > expected,
+        ">=": current >= expected,
+        "<": current < expected,
+        "<=": current <= expected,
+    }
+    if op not in ops:
+        raise TestExecError(f"unsupported version op: {op}")
+    matched = ops[op]
+    log.info(f"version check {current} {op} {expected}: {matched}")
+    if matched and issue_id:
+        log.info(f"Known issue {issue_id}: ceph {op} {expected_version}")
+    return matched
+
+
 def get_ceph_status():
     """
     get the ceph cluster status and health

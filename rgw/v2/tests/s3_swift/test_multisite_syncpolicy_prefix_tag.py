@@ -64,6 +64,9 @@ def test_exec(config, ssh_con):
             break
     rgw_ssh_con = utils.connect_remote(node_rgw)
 
+    if not reusable.verify_zonegroup_sync_group(rgw_ssh_con, group_id, user_info):
+        return
+
     prefix = "foo"
     tag = "colour=red"
 

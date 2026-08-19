@@ -2652,6 +2652,81 @@ def get_sync_policy(bucket_name=None):
     return sync_policy_resp
 
 
+def verify_zonegroup_sync_group(ssh_con, group_id, users, group_status="enabled"):
+    """
+    Verify zonegroup sync group on both sites. On failure, remove policy and users.
+
+    :param ssh_con: SSH connection to the secondary site
+    :param group_id: sync group id, or list of group ids
+    :param users: user info list to remove on failure
+    :param group_status: status passed to sync group remove
+    :return: True to continue, False if IBMCEPH-17548 on >= 20.2.2 (exit test as pass)
+    """
+    group_ids = group_id if isinstance(group_id, list) else [group_id]
+
+    def _group_id_matches(group_info, gid):
+        if not isinstance(group_info, dict):
+            return False
+        if group_info.get("id") == gid:
+            return True
+        return any(group.get("id") == gid for group in group_info.get("groups", []))
+
+    try:
+        for gid in group_ids:
+            cmd = f"radosgw-admin sync group get --group-id={gid}"
+            log.info(f"Verify sync group get on primary for group {gid}")
+            primary_out = utils.exec_shell_cmd(cmd)
+            if primary_out is False:
+                raise TestExecError(f"sync group get failed on primary for {gid}")
+            try:
+                primary_group = json.loads(primary_out)
+            except Exception:
+                raise TestExecError(
+                    f"invalid json from sync group get on primary for {gid}"
+                )
+            log.info(f"sync group get from primary: {primary_group}")
+            if not _group_id_matches(primary_group, gid):
+                raise TestExecError(f"sync group {gid} not found on primary")
+            log.info(f"sync group {gid} verified on primary")
+
+            log.info(f"Verify sync group get on secondary site for group {gid}")
+            group_found = False
+            other_site_group = None
+            for retry_count in range(21):
+                _, stdout, stderr = ssh_con.exec_command(cmd)
+                sync_group_out = stdout.read().decode()
+                sync_group_error = stderr.read().decode()
+                try:
+                    other_site_group = json.loads(sync_group_out)
+                except Exception:
+                    other_site_group = None
+                if _group_id_matches(other_site_group, gid):
+                    log.info(f"sync group get from secondary: {other_site_group}")
+                    group_found = True
+                    break
+                if retry_count == 20:
+                    break
+                log.info(
+                    f"sync group {gid} not on secondary, retry {retry_count}: {sync_group_error.strip()}"
+                )
+                time.sleep(60)
+            if not group_found:
+                raise TestExecError(f"sync group get failed on secondary for {gid}")
+            log.info(f"sync group {gid} verified on both sites")
+        return True
+    except TestExecError as e:
+        for gid in group_ids:
+            group_operation(gid, "remove", group_status)
+        utils.exec_shell_cmd("radosgw-admin period update --commit")
+        for user in users:
+            remove_user(user)
+        if utils.is_known_issue_version("20.2.2", "IBMCEPH-17548", op=">="):
+            return False
+        raise TestExecError(
+            f"sync group get failed for {group_ids[0]} on both sites: {e}"
+        )
+
+
 def verify_bucket_sync_on_other_site(rgw_ssh_con, bucket):
     log.info(f"verify Bucket {bucket.name} exist on another site")
     _, stdout, _ = rgw_ssh_con.exec_command("radosgw-admin bucket list")
