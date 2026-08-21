@@ -1103,3 +1103,52 @@ def get_rgw_endpoint_url(ssh_con=None):
     endpoint_url = f"{endpoint_proto}://{endpoint_hostname_or_ip}:{endpoint_port}"
     log.info(f"RGW endpoint url from ceph orch ls: {endpoint_url}")
     return endpoint_url
+
+
+def install_configure_dnsmasq(domain, ip_address):
+    """
+    This method installs and configures dnsmasq for wildcard dns resolution.
+    also configures loopback namespace in /etc/resolve.conf for dns resolution to work properly
+    """
+
+    out = exec_shell_cmd("rpm -q dnsmasq || sudo yum install -y dnsmasq")
+    if out is False:
+        raise Exception("dnsmasq installation failed")
+
+    # Configuration variables
+    conf_file = "/etc/dnsmasq.conf"
+
+    # The dnsmasq syntax for a domain and all its subdomains
+    wildcard_line = f"address=/{domain}/{ip_address}\n"
+    wildcard_line_localhost = "address=/localhost/127.0.0.1\n"
+
+    conf_file_content = exec_shell_cmd(f"cat {conf_file} | grep -v ^# | grep -v ^$")
+    # Append the wildcard resolution line if not already exist
+    with open(conf_file, "a") as file:
+        if wildcard_line in conf_file_content:
+            log.info(f"'{wildcard_line}' already exist")
+        else:
+            file.write(wildcard_line)
+        if wildcard_line_localhost in conf_file_content:
+            log.info(f"'{wildcard_line_localhost}' already exist")
+        else:
+            file.write(wildcard_line_localhost)
+    print(f"Successfully added wildcard for {domain} to {conf_file}.")
+
+    # Add the nameserver for loopback as the first active line
+    resolve_conf_file = "/etc/resolv.conf"
+    nameserver_line = "nameserver 127.0.0.1"
+    resolve_conf_file_content = exec_shell_cmd(f"cat {resolve_conf_file}")
+    resolve_conf_file_content = resolve_conf_file_content.strip()
+    if nameserver_line not in resolve_conf_file_content:
+        resolve_conf_file_content = f"{nameserver_line}\n{resolve_conf_file_content}"
+    with open(resolve_conf_file, "w") as file:
+        file.write(resolve_conf_file_content)
+    print(
+        f"Successfully added namespace localhost as first active line to {resolve_conf_file}."
+    )
+
+    # Restart the dnsmasq service to apply changes
+    out = exec_shell_cmd("sudo systemctl restart dnsmasq")
+    if out is False:
+        raise Exception("dnsmasq restart failed")
