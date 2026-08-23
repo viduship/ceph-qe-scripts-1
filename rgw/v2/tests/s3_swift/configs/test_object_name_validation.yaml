@@ -1,0 +1,31 @@
+# test script: test_object_name_validation.py
+# Ref: https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html
+#
+# Object keys are UTF-8, max 1024 bytes. Any UTF-8 character is allowed by S3,
+# but some names need extra handling or are recommended to avoid.
+#
+# Categories (see test_ops.categories):
+#   safe_characters            - alnum plus ! - _ . * ' ( )
+#   period_only_path_segments  - '.' / '..' path segments and AWS relative-path examples
+#   special_handling           - & $ @ = ; / : + space , ? and ASCII 00-1F / 7F
+#   characters_to_avoid        - \ { } ^ % ` ] " > [ ~ < # | and ASCII 128-255
+#   hard_limits                - empty key, 1024-byte max, virtual-hosted "soap" caveat
+config:
+  user_count: 1
+  user_remove: true
+  objects_count: 1
+  objects_size_range:
+      min: 5
+      max: 15
+  ssl: false
+  haproxy: false
+  test_ops:
+    object_name_validation: true
+    verify_roundtrip: true
+    expand_ascii_ranges: true
+    categories:
+      - safe_characters
+      - period_only_path_segments
+      - special_handling
+      - characters_to_avoid
+      - hard_limits
