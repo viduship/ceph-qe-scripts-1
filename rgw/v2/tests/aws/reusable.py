@@ -520,7 +520,7 @@ def conditional_put_object(
         raise AWSCommandExecError(message=str(e))
 
 
-def put_object(aws_auth, bucket_name, object_name, end_point):
+def put_object(aws_auth, bucket_name, object_name, end_point, body=None):
     """
     Put/uploads object to the bucket
     Ex: /usr/local/bin/aws s3api put-object --bucket <bucket_name> --key <object_name> --body <content> --endpoint <endpoint_url>
@@ -528,13 +528,15 @@ def put_object(aws_auth, bucket_name, object_name, end_point):
         bucket_name(str): Name of the bucket from which object needs to be listed
         object_name(str): Name of the object/file
         end_point(str): endpoint
+        body(str): local file path for --body; defaults to object_name
     Return:
         Response of put-object operation
     """
+    body_path = body if body else object_name
     command = aws_auth.command(
         operation="put-object",
         params=[
-            f"--bucket {bucket_name} --key {object_name} --body {object_name} --endpoint-url {end_point}",
+            f"--bucket {bucket_name} --key {object_name} --body {body_path} --endpoint-url {end_point}",
         ],
     )
     try:
@@ -1042,6 +1044,25 @@ def put_bucket_cors(aws_auth, bucket_name, policy_file, endpoint):
         return create_response
     except Exception as e:
         raise AWSCommandExecError(message=str(e))
+
+
+def put_bucket_cors_config(aws_auth, bucket_name, cors_configuration, endpoint):
+    """
+    Put a CORS policy from a dict (writes a temp JSON file for put-bucket-cors).
+    Args:
+        cors_configuration(dict): CORSRules document for --cors-configuration
+    """
+    cors_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as cors_file:
+            cors_file.write(json.dumps(cors_configuration, indent=2))
+            cors_path = cors_file.name
+        return put_bucket_cors(aws_auth, bucket_name, cors_path, endpoint)
+    finally:
+        if cors_path and os.path.exists(cors_path):
+            os.remove(cors_path)
 
 
 def calculate_checksum(algo, file):
