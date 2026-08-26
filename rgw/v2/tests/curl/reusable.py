@@ -24,6 +24,34 @@ sys.path.append(os.path.abspath(os.path.join(__file__, "../../../../")))
 
 import v2.utils.utils as utils
 
+# SHA256 of an empty payload; SigV4 x-amz-content-sha256 for HTTP GET.
+EMPTY_PAYLOAD_SHA256 = (
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+)
+
+
+def sigv4_content_sha256(ssl=False):
+    """
+    Value for SigV4 x-amz-content-sha256 on GET (empty body).
+    HTTPS frontends need UNSIGNED-PAYLOAD; HTTP rejects that with
+    AccessDenied and needs the empty-payload hash.
+    Args:
+        ssl(bool): True when the endpoint is https
+    Return:
+        str: header value
+    """
+    if ssl:
+        return "UNSIGNED-PAYLOAD"
+    return EMPTY_PAYLOAD_SHA256
+
+
+def _curl_semver(version_text):
+    """Parse 'curl X.Y.Z' from curl --version output."""
+    match = re.search(r"curl (\d+)\.(\d+)\.(\d+)", version_text or "")
+    if not match:
+        return (0, 0, 0)
+    return tuple(int(x) for x in match.groups())
+
 
 def install_curl(version="7.88.1"):
     """
@@ -32,28 +60,31 @@ def install_curl(version="7.88.1"):
         version(str): Version of the curl to install
     """
     existing_version = utils.exec_shell_cmd("curl --version")
-    if (
-        existing_version
-        and f"curl {version}" in existing_version.strip()
-        and f"libcurl/{version}" in existing_version.strip()
-    ):
-        log.info(f"CURL is already installed with the version {version}")
+    have = _curl_semver(existing_version)
+    want = _curl_semver(f"curl {version}")
+    if have >= want:
+        log.info(
+            f"CURL is already installed with version " f"{have[0]}.{have[1]}.{have[2]}"
+        )
         return True
+    # 7.76 has --aws-sigv4 but does not sign GET the same as boto3 (HTTP 403).
+    # Only skip rebuild when curl is already new enough.
     try:
         log.info(f"installing curl {version}")
         utils.exec_shell_cmd("sudo rm -rf curl*")
         utils.exec_shell_cmd(f"wget https://curl.se/download/curl-{version}.zip")
         utils.exec_shell_cmd("sudo yum install wget gcc openssl-devel make unzip -y")
         utils.exec_shell_cmd(f"unzip curl-{version}.zip")
+        prefix = "/home/cephuser/curl"
         utils.exec_shell_cmd(
-            f"cd curl-{version}; ./configure --prefix=/home/cephuser/curl --with-openssl; make; sudo make install"
+            f"cd curl-{version}; ./configure --prefix={prefix} --with-openssl; make; sudo make install"
         )
         if existing_version:
             existing_curl_version = existing_version.strip().split(" ")[1]
             utils.exec_shell_cmd(
                 f"sudo mv /usr/bin/curl /usr/bin/curl-{existing_curl_version}.bak"
             )
-        utils.exec_shell_cmd("sudo cp curl/bin/curl /usr/bin/")
+        utils.exec_shell_cmd(f"sudo cp {prefix}/bin/curl /usr/bin/")
         utils.exec_shell_cmd("which curl")
         upgraded_version = utils.exec_shell_cmd("curl --version")
         if (
