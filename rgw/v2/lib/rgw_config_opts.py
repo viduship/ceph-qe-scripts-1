@@ -57,6 +57,7 @@ class ConfigOpts(object):
     rgw_swift_url_prefix = "rgw_swift_url_prefix"
     rgw_dynamic_resharding_reduction_wait = "rgw_dynamic_resharding_reduction_wait"
     rgw_reshard_debug_interval = "rgw_reshard_debug_interval"
+    rgw_relaxed_topic_names = "rgw_relaxed_topic_names"
     rgw_user_counters_cache = "rgw_user_counters_cache"
     rgw_bucket_counters_cache = "rgw_bucket_counters_cache"
 

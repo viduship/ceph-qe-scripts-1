@@ -28,6 +28,7 @@ Usage: test_bucket_notification.py -c <input_yaml>
     multisite_configs/test_sse_s3_per_bucket_with_notifications_dynamic_reshard_rgw_accounts.yaml
     test_bucket_notification_kafka_broker_rgw_admin_notif_rm.yaml
     test_bucket_notification_kafka_broker_multipart_with_kafka_acl_config_set.yaml
+    test_bucket_notification_relaxed_topic_names.yaml
 Operation:
     create user (tenant/non-tenant)
     Create topic and get topic
@@ -135,6 +136,8 @@ def test_exec(config, ssh_con):
         )
         other_site_ssh_con = utils.connect_remote(other_site_rgw_ip)
 
+    relaxed_topic_names_enabled = False
+
     for each_user in all_users_info:
         # authenticate
         auth = Auth(each_user, ssh_con, ssl=config.ssl)
@@ -200,6 +203,39 @@ def test_exec(config, ssh_con):
                     topic_id = str(uuid.uuid4().hex[:16])
                     persistent = False
                     topic_name = "cephci-kafka-" + ack_type + "-ack-type-" + topic_id
+                    # IBMCEPH-14429: enable relaxed names, CreateTopic for all
+                    # invalid character types from config, then run notifications
+                    # with Kafka-safe topic from config
+                    if config.test_ops.get("test_relaxed_topic_names", False):
+                        if not relaxed_topic_names_enabled:
+                            log.info("enabling rgw_relaxed_topic_names")
+                            ceph_conf.set_to_ceph_conf(
+                                "global",
+                                ConfigOpts.rgw_relaxed_topic_names,
+                                "true",
+                                ssh_con,
+                            )
+                            relaxed_topic_names_enabled = True
+                        invalid_topic_names = config.test_ops.get("invalid_topic_names")
+                        for invalid_name in invalid_topic_names:
+                            unique_name = f"{invalid_name}-{topic_id}"
+                            log.info(
+                                f"creating topic with invalid characters: {unique_name}"
+                            )
+                            notification.create_topic(
+                                rgw_sns_conn,
+                                endpoint,
+                                ack_type,
+                                unique_name,
+                                persistent,
+                                security_type,
+                                mechanism,
+                            )
+                        # notification flow uses Kafka-safe invalid name from config
+                        topic_name = (
+                            f"{config.test_ops.get('notification_topic_name')}"
+                            f"-{ack_type}-{topic_id}"
+                        )
                     log.info(
                         f"creating a topic with {endpoint} endpoint with ack type {ack_type}"
                     )
@@ -527,6 +563,15 @@ def test_exec(config, ssh_con):
 
                 # delete topic logs on kafka broker
                 notification.del_topic_from_kafka_broker(topic_name)
+
+    if config.test_ops.get("test_relaxed_topic_names", False):
+        log.info("disabling rgw_relaxed_topic_names")
+        ceph_conf.set_to_ceph_conf(
+            "global",
+            ConfigOpts.rgw_relaxed_topic_names,
+            "false",
+            ssh_con,
+        )
 
     # check sync status if a multisite cluster
     reusable.check_sync_status()
