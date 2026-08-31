@@ -1,10 +1,11 @@
-# script: test_bucket_location_constraintpy
+# script: test_bucket_location_constraint.py
 # Polarian id: CEPH-83623503
 config:
   user_count: 1
   bucket_count: 1
   test_ops:
     create_bucket: true
+    delete_bucket: true
     test_primary_zg: false
     test_tertiary_zg: true
     test_default_zg: false
