@@ -5,6 +5,7 @@ config:
   bucket_count: 1
   test_ops:
     create_bucket: true
+    delete_bucket: true
     test_primary_zg: true
     test_tertiary_zg: false
     test_default_zg: false

@@ -1,5 +1,5 @@
 """
-test_bucket_location_constraint - Test bucket creation with location constraints in multisite setup
+test_bucket_location_constraint - Test bucket creation and deletion with location constraints in multisite setup
 
 Usage: test_bucket_location_constraint.py -c <input_yaml>
 
@@ -7,8 +7,9 @@ Usage: test_bucket_location_constraint.py -c <input_yaml>
         test_bucket_location_constraint.yaml
 
 Operation:
-    This test validates bucket creation behavior with different location constraints
-    across multiple zonegroups in a multisite RGW setup using AWS CLI, boto3, and s3cmd.
+    This test validates bucket creation and deletion behavior with different location
+    constraints across multiple zonegroups in a multisite RGW setup using AWS CLI,
+    boto3, and s3cmd.
 """
 
 import os
@@ -21,6 +22,8 @@ import logging
 import time
 import traceback
 
+import botocore.exceptions
+import v2.lib.manage_data as manage_data
 import v2.lib.resource_op as s3lib
 import v2.utils.utils as utils
 from v2.lib.aws import auth as aws_auth
@@ -122,7 +125,7 @@ def test_exec(config, ssh_con):
         created_buckets = []
 
         try:
-            if config.test_ops["create_bucket"]:
+            if config.test_ops.get("create_bucket"):
                 # Test 1 & 2: Primary zonegroup tests
                 if config.test_ops.get("test_primary_zg", True):
                     # Test 1: Create bucket in primary zonegroup via primary endpoint
@@ -223,10 +226,10 @@ def test_exec(config, ssh_con):
                     output = utils.exec_shell_cmd(cmd)
                     log.info(f"Bucket '{bucket_name_s3cmd}' info: {output}")
 
-                    # Test 2: Create bucket in tertiary zonegroup via primary endpoint (should fail)
+                    # Test 2: Create bucket in tertiary zonegroup via primary endpoint
                     log.info("=" * 100)
                     log.info(
-                        f"TEST 2: Create bucket in {tertiary_zonegroup} via primary endpoint (should fail)"
+                        f"TEST 2: Create bucket in {tertiary_zonegroup} via primary endpoint"
                     )
                     log.info("=" * 100)
 
@@ -425,10 +428,10 @@ def test_exec(config, ssh_con):
                     output = utils.exec_shell_cmd(cmd)
                     log.info(f"Bucket '{bucket_name_s3cmd}' info: {output}")
 
-                    # Test 4: Create primary zonegroup bucket via tertiary endpoint (should fail)
+                    # Test 4: Create primary zonegroup bucket via tertiary endpoint
                     log.info("=" * 100)
                     log.info(
-                        f"TEST 4: Create {primary_zonegroup} bucket via {tertiary_zonegroup} endpoint (should fail)"
+                        f"TEST 4: Create {primary_zonegroup} bucket via {tertiary_zonegroup} endpoint"
                     )
                     log.info("=" * 100)
 
@@ -523,10 +526,10 @@ def test_exec(config, ssh_con):
 
                 # Test 5 & 6: Default zonegroup tests
                 if config.test_ops.get("test_default_zg", True):
-                    # Test 5: Create bucket via tertiary endpoint without region (defaults to tertiary zonegroup)
+                    # Test 5: Create bucket via tertiary endpoint without region
                     log.info("=" * 100)
                     log.info(
-                        f"TEST 5: Create bucket via {tertiary_zonegroup} endpoint without region (defaults to {tertiary_zonegroup})"
+                        f"TEST 5: Create bucket via {tertiary_zonegroup} endpoint without region"
                     )
                     log.info("=" * 100)
 
@@ -616,10 +619,10 @@ def test_exec(config, ssh_con):
                     output = utils.exec_shell_cmd(cmd)
                     log.info(f"Bucket '{bucket_name_s3cmd}' info: {output}")
 
-                    # Test 6: Create bucket via primary endpoint without region (defaults to primary zonegroup)
+                    # Test 6: Create bucket via primary endpoint without region
                     log.info("=" * 100)
                     log.info(
-                        f"TEST 6: Create bucket via primary endpoint without region (defaults to {primary_zonegroup})"
+                        f"TEST 6: Create bucket via primary endpoint without region"
                     )
                     log.info("=" * 100)
 
@@ -716,6 +719,160 @@ def test_exec(config, ssh_con):
                 log.info("ALL TESTS PASSED")
                 log.info("=" * 100)
 
+            if config.test_ops.get("delete_bucket_with_objects") and tertiary_endpoint:
+                log.info("=" * 100)
+                log.info(
+                    f"TEST 11: Delete bucket after removing objects in "
+                    f"{tertiary_zonegroup} via {tertiary_zonegroup} endpoint"
+                )
+                log.info("=" * 100)
+
+                # Test 11a: boto3
+                bucket_name_boto = utils.gen_bucket_name_from_userid(
+                    each_user["user_id"], rand_no=31
+                )
+                log.info(f"Creating bucket '{bucket_name_boto}' using boto3")
+                bucket = reusable.create_bucket(
+                    bucket_name_boto,
+                    rgw_tertiary,
+                    each_user,
+                    location=tertiary_zonegroup,
+                )
+                for oc, size in list(config.mapped_sizes.items()):
+                    config.obj_size = size
+                    s3_object_name = utils.gen_s3_object_name(bucket.name, oc)
+                    reusable.upload_object(
+                        s3_object_name,
+                        bucket,
+                        TEST_DATA_PATH,
+                        config,
+                        each_user,
+                    )
+                log.info(
+                    f"Deleting objects and bucket '{bucket_name_boto}' using boto3"
+                )
+                reusable.delete_objects(bucket, gc_verification=False)
+                reusable.delete_bucket(bucket)
+                try:
+                    rgw_client_tertiary.head_bucket(Bucket=bucket_name_boto)
+                    raise TestExecError(
+                        f"Bucket '{bucket_name_boto}' should be deleted"
+                    )
+                except botocore.exceptions.ClientError as e:
+                    error_code = e.response.get("Error", {}).get("Code", "")
+                    if error_code not in ("404", "NoSuchBucket", "NotFound"):
+                        raise TestExecError(
+                            f"Unexpected error verifying deleted bucket "
+                            f"'{bucket_name_boto}': {e}"
+                        )
+
+                # Test 11b: AWS CLI
+                bucket_name_aws = utils.gen_bucket_name_from_userid(
+                    each_user["user_id"], rand_no=32
+                )
+                log.info(f"Creating bucket '{bucket_name_aws}' using AWS CLI")
+                aws_reusable.create_bucket(
+                    cli_aws,
+                    bucket_name_aws,
+                    tertiary_endpoint,
+                    region=tertiary_zonegroup,
+                )
+                for oc, size in list(config.mapped_sizes.items()):
+                    config.obj_size = size
+                    s3_object_name = utils.gen_s3_object_name(bucket_name_aws, oc)
+                    s3_object_path = os.path.join(TEST_DATA_PATH, s3_object_name)
+                    if manage_data.io_generator(s3_object_path, size) is False:
+                        raise TestExecError(
+                            f"data creation failed for '{s3_object_name}'"
+                        )
+                    put_cmd = cli_aws.command(
+                        operation="put-object",
+                        params=[
+                            f"--bucket {bucket_name_aws} --key {s3_object_name} "
+                            f"--body {s3_object_path} --endpoint-url {tertiary_endpoint}"
+                        ],
+                    )
+                    if not utils.exec_shell_cmd(put_cmd):
+                        raise TestExecError(
+                            f"AWS CLI put-object failed for '{s3_object_name}'"
+                        )
+                log.info(
+                    f"Deleting objects and bucket '{bucket_name_aws}' using AWS CLI"
+                )
+                list_output = json.loads(
+                    aws_reusable.list_objects(
+                        cli_aws, bucket_name_aws, tertiary_endpoint
+                    )
+                )
+                aws_reusable.delete_objects(
+                    cli_aws,
+                    bucket_name_aws,
+                    [{"Key": o["Key"]} for o in list_output.get("Contents", [])],
+                    tertiary_endpoint,
+                )
+                aws_reusable.delete_bucket(cli_aws, bucket_name_aws, tertiary_endpoint)
+                head_cmd = cli_aws.command(
+                    operation="head-bucket",
+                    params=[
+                        f"--bucket {bucket_name_aws} --endpoint-url {tertiary_endpoint}"
+                    ],
+                )
+                head_result = utils.exec_shell_cmd(head_cmd, return_err=True)
+                if (
+                    head_result is not False
+                    and "404" not in str(head_result)
+                    and "Not Found" not in str(head_result)
+                ):
+                    raise TestExecError(
+                        f"head-bucket should return 404 for deleted bucket "
+                        f"'{bucket_name_aws}': {head_result}"
+                    )
+
+                # Test 11c: s3cmd
+                s3cmd_auth.do_auth(each_user, tertiary_ip_and_port)
+                bucket_name_s3cmd = utils.gen_bucket_name_from_userid(
+                    each_user["user_id"], rand_no=33
+                )
+                log.info(f"Creating bucket '{bucket_name_s3cmd}' using s3cmd")
+                s3cmd_create = S3CMD("mb", [f"--region={tertiary_zonegroup}"])
+                output = utils.exec_shell_cmd(
+                    s3cmd_create.command([f"s3://{bucket_name_s3cmd}"])
+                )
+                if not output or "ERROR" in str(output):
+                    raise TestExecError(f"s3cmd bucket creation failed: {output}")
+                for oc, size in list(config.mapped_sizes.items()):
+                    config.obj_size = size
+                    s3_object_name = utils.gen_s3_object_name(bucket_name_s3cmd, oc)
+                    s3cmd_reusable.upload_file(
+                        bucket_name_s3cmd,
+                        file_name=s3_object_name,
+                        file_size=size,
+                        test_data_path=TEST_DATA_PATH,
+                    )
+                log.info(
+                    f"Deleting objects and bucket '{bucket_name_s3cmd}' using s3cmd"
+                )
+                for oc, size in list(config.mapped_sizes.items()):
+                    s3_object_name = utils.gen_s3_object_name(bucket_name_s3cmd, oc)
+                    s3cmd_reusable.delete_file(bucket_name_s3cmd, s3_object_name)
+                s3cmd_reusable.delete_bucket(bucket_name_s3cmd)
+                info_output = utils.exec_shell_cmd(
+                    S3CMD("info", []).command([f"s3://{bucket_name_s3cmd}"])
+                )
+                if (
+                    info_output is not False
+                    and "404" not in str(info_output)
+                    and "does not exist" not in str(info_output)
+                ):
+                    raise TestExecError(
+                        f"s3cmd info should return 404 for deleted bucket "
+                        f"'{bucket_name_s3cmd}': {info_output}"
+                    )
+
+                log.info("=" * 100)
+                log.info("ALL DELETE BUCKET WITH OBJECTS TESTS PASSED")
+                log.info("=" * 100)
+
         except Exception as e:
             log.error(f"Test failed: {str(e)}")
             log.error(traceback.format_exc())
@@ -790,6 +947,8 @@ if __name__ == "__main__":
         )
         config = Config(args.config)
         config.read(ssh_con)
+        if config.mapped_sizes is None and config.objects_count:
+            config.mapped_sizes = utils.make_mapped_sizes(config)
 
         test_exec(config, ssh_con)
         test_info.success_status("test passed")
