@@ -1,6 +1,10 @@
 """
 Usage: test_iam_get_account_summary.py -c <input_yaml>
 
+<input_yaml>
+    configs/test_iam_get_account_summary.yaml
+    configs/test_iam_get_account_summary_with_caps.yaml
+
 This test automates the iam:GetAccountSummary API call with comprehensive scenarios.
 It covers multiple users, buckets, and validates account summary at different stages.
 
@@ -8,11 +12,12 @@ Operation:
 1. Create RGW account using radosgw-admin
 2. Create root user with account-root flag
 3. Create multiple IAM users (configurable)
-4. Create access keys for IAM users
-5. Attach policies to IAM users
-6. Create buckets for different users
-7. Call iam:GetAccountSummary API at different stages and validate responses
-8. Test various scenarios: users with/without buckets, different policies, etc.
+4. If add_iam_user_caps is true and Ceph version > 19.2.0, add iam_user_caps to each IAM user
+5. Create access keys for IAM users
+6. Attach policies to IAM users
+7. Create buckets for different users
+8. Call iam:GetAccountSummary API at different stages and validate responses
+9. Test various scenarios: users with/without buckets, different policies, etc.
 """
 
 import argparse
@@ -120,6 +125,58 @@ def validate_account_summary(iam_client, expected_min_users=0, stage=""):
         raise TestExecError(
             f"Unexpected error calling get_account_summary at {stage}: {e}"
         )
+
+
+def get_iam_user_rgw_uid(account_id, iam_user_name):
+    """
+    Resolve the RGW uid for an IAM user by matching display_name.
+    IAM users created via the IAM API do not use UserName as the RGW uid.
+    """
+    user_list_output = utils.exec_shell_cmd(
+        f"radosgw-admin user list --account-id {account_id}"
+    )
+    if not user_list_output:
+        raise TestExecError(
+            f"Failed to list users in account {account_id} while resolving uid for {iam_user_name}"
+        )
+    try:
+        user_list = json.loads(user_list_output)
+    except json.JSONDecodeError as e:
+        raise TestExecError(f"Failed to parse user list for account {account_id}: {e}")
+
+    if not isinstance(user_list, list):
+        raise TestExecError(f"Unexpected user list format for account {account_id}")
+
+    for uid in user_list:
+        if not uid:
+            continue
+        user_info_output = utils.exec_shell_cmd(f"radosgw-admin user info --uid={uid}")
+        if not user_info_output:
+            continue
+        try:
+            info = json.loads(user_info_output)
+        except json.JSONDecodeError:
+            continue
+        if info.get("display_name") == iam_user_name:
+            return uid
+
+    raise TestExecError(
+        f"Could not find RGW uid for IAM user {iam_user_name} in account {account_id}"
+    )
+
+
+def is_ceph_version_greater_than(min_version=(19, 2, 0)):
+    """Return True if the cluster Ceph version is greater than min_version."""
+    ceph_version_id, _ = utils.get_ceph_version()
+    release = ceph_version_id.split("-")[0].split(".")
+    try:
+        if len(release) >= 3:
+            current = (int(release[0]), int(release[1]), int(release[2]))
+            log.info(f"Ceph version {ceph_version_id} parsed as {current}")
+            return current > min_version
+    except (TypeError, ValueError):
+        log.warning(f"Could not parse Ceph version '{ceph_version_id}'")
+    return False
 
 
 def test_exec(config, ssh_con):
@@ -277,6 +334,11 @@ def test_exec(config, ssh_con):
         num_iam_users = len(iam_user_names)
 
     log.info(f"Creating {num_iam_users} IAM users: {iam_user_names}")
+    add_iam_user_caps = config.test_ops.get("add_iam_user_caps", False)
+    iam_user_caps = config.test_ops.get("iam_user_caps")
+    ceph_version_supports_caps = is_ceph_version_greater_than((19, 2, 0))
+    if add_iam_user_caps and not ceph_version_supports_caps:
+        log.info("Skipping IAM user caps: requires Ceph version > 19.2.0")
 
     for i, iam_user_name in enumerate(iam_user_names):
         log.info(f"Creating IAM user {i+1}/{num_iam_users}: {iam_user_name}")
@@ -285,6 +347,18 @@ def test_exec(config, ssh_con):
             log.info(f"Created IAM user: {iam_user_name}")
         except iam_client.exceptions.EntityAlreadyExistsException:
             log.info(f"IAM user '{iam_user_name}' already exists, continuing...")
+
+        if add_iam_user_caps and iam_user_caps and ceph_version_supports_caps:
+            rgw_uid = get_iam_user_rgw_uid(account_id, iam_user_name)
+            add_caps_cmd = (
+                f'radosgw-admin caps add --uid="{rgw_uid}" ' f'--caps="{iam_user_caps}"'
+            )
+            log.info(
+                f"Adding caps '{iam_user_caps}' to IAM user {iam_user_name} "
+                f"(uid={rgw_uid})"
+            )
+            utils.exec_shell_cmd(add_caps_cmd)
+            log.info(f"Added caps to IAM user {iam_user_name}")
 
         # Create access keys for each user
         try:
