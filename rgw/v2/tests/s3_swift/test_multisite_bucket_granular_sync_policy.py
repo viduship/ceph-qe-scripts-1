@@ -168,6 +168,10 @@ def test_exec(config, ssh_con):
                     source_zones=zonegroup_source_pipe,
                     dest_zones=zonegroup_dest_pipe,
                 )
+            if not reusable.verify_zonegroup_sync_group(
+                rgw_ssh_con, group_id, all_users_info, group_status
+            ):
+                return
 
     if config.test_ops.get("create_bucket", False):
         for each_user in all_users_info:

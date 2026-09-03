@@ -123,6 +123,13 @@ def test_exec(config, ssh_con):
                         group_id2 = "new_group"
                         reusable.group_operation(group_id2, "create", group_status)
                         pipe2 = reusable.pipe_operation(group_id2, "create", zone_names)
+                    group_ids = [group_id]
+                    if config.test_ops.get("group_transition", False):
+                        group_ids.append(group_id2)
+                    if not reusable.verify_zonegroup_sync_group(
+                        rgw_ssh_con, group_ids, all_users_info, group_status
+                    ):
+                        return
 
     if config.test_ops.get("create_bucket", False):
         for each_user in all_users_info:
