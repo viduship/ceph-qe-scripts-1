@@ -1,0 +1,24 @@
+# script-name: test_reuseport.py
+# polarion-id:
+# covers: https://tracker.ceph.com/issues/78118 / https://github.com/ceph/ceph/pull/70093
+# scenario: enable allow_port_reuse with count_per_host=2, verify so_reuseport,
+#           same port per host, and run S3 IO on the shared endpoint
+config:
+  user_count: 1
+  objects_count: 5
+  objects_size_range:
+    min: 5
+    max: 15
+  test_ops:
+    allow_port_reuse: true
+    count_per_host: 2
+    rgw_frontend_port: 8000
+    service_id: reuseport-qe
+    # omit placement_hosts to use the first orch host only
+    verify_so_reuseport: true
+    verify_same_port_per_host: true
+    perform_s3_io: true
+    download_object: true
+    delete_bucket_object: true
+    cleanup_service: true
+    wait_timeout: 300

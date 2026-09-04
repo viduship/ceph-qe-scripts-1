@@ -1,0 +1,28 @@
+# script-name: test_reuseport_edge.py
+# covers: PR #70093 prepare_create — so_reuseport then extra_args
+# scenario: allow_port_reuse=true AND rgw_frontend_extra_args includes so_reuseport=1
+# expected: exactly one so_reuseport=1 token (no duplication)
+config:
+  user_count: 1
+  objects_count: 1
+  objects_size_range:
+    min: 5
+    max: 10
+  test_ops:
+    scenario: extra_args_frontend
+    frontend_assert: no_duplicate
+    allow_port_reuse: true
+    count_per_host: 2
+    rgw_frontend_port: 8700
+    service_id: reuseport-edge-dup
+    rgw_frontend_extra_args:
+      - so_reuseport=1
+      - tcp_nodelay=1
+    rgw_realm: india
+    rgw_zonegroup: shared
+    rgw_zone: primary
+    disable_multisite_sync_traffic: true
+    perform_s3_io: false
+    cleanup_service: true
+    wait_timeout: 300
+    force_redeploy_after_apply: true
